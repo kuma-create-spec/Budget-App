@@ -43,6 +43,39 @@ const THEMES = {
 
 const BIG_DATE_STYLE = { fontSize: 18, padding: '10px 12px', borderRadius: 8, border: '1px solid #ccc', width: '100%', boxSizing: 'border-box' }
 
+// Google One / Gemini Advanced風の虹色リング
+const RAINBOW_RING = 'conic-gradient(from 180deg, #4285F4, #EA4335, #FBBC05, #34A853, #4285F4)'
+
+function ProfileAvatar({ src, alt, size = 36, onClick }) {
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        background: RAINBOW_RING,
+        padding: 2.5,
+        cursor: onClick ? 'pointer' : 'default',
+        boxSizing: 'border-box',
+      }}
+    >
+      <img
+        src={src}
+        alt={alt}
+        style={{
+          width: '100%',
+          height: '100%',
+          borderRadius: '50%',
+          display: 'block',
+          border: '2px solid #fff',
+          boxSizing: 'border-box',
+        }}
+      />
+    </div>
+  )
+}
+
 function DigitPadModal({ label, initialValue, onConfirm, onClose }) {
   const [inputStr, setInputStr] = useState(initialValue ? String(initialValue) : '')
 
@@ -275,7 +308,7 @@ function App() {
   const tokenClientRef = useRef(null)
   const sheetIdCacheRef = useRef({})
   const lastCommentedMonthRef = useRef(null)
-  const accessTokenRef = useRef(null) // 非同期処理の中で常に最新のトークンを参照するため
+  const accessTokenRef = useRef(null)
 
   const [date, setDate] = useState('')
   const [store, setStore] = useState('')
@@ -284,8 +317,7 @@ function App() {
   const [memo, setMemo] = useState('')
   const [receiptCategory, setReceiptCategory] = useState('')
 
-  // レシートの読み取り待ち行列(連続で撮影できるようにするための一覧)
-  const [receiptQueue, setReceiptQueue] = useState([]) // { id, status: 'processing'|'done'|'error', date, store, amount, category, error }
+  const [receiptQueue, setReceiptQueue] = useState([])
 
   const [yearMonth, setYearMonth] = useState('')
   const [totalPay, setTotalPay] = useState(0)
@@ -567,10 +599,9 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, summarySubView, selectedMonth, monthlySummary])
 
-  // レシート画像が選ばれた瞬間に、待ち行列に追加してすぐに次の撮影ができるようにする
   const handleReceiptImage = (e) => {
     const file = e.target.files[0]
-    e.target.value = '' // すぐにリセットして、続けて撮影できるようにする
+    e.target.value = ''
 
     if (!file) return
     if (!accessTokenRef.current) {
@@ -579,11 +610,10 @@ function App() {
     }
 
     const jobId = Math.random().toString(16).slice(2, 10)
-    const chosenCategory = receiptCategory // その時点で選ばれていたカテゴリを使う
+    const chosenCategory = receiptCategory
 
     setReceiptQueue((prev) => [{ id: jobId, status: 'processing' }, ...prev])
 
-    // ここから先は裏側で処理し、画面はブロックしない
     ;(async () => {
       try {
         const result = await analyzeReceipt(file)
@@ -928,13 +958,7 @@ function App() {
           <h1 style={{ fontSize: 32, margin: 0, color: theme.text, letterSpacing: 0.5, fontWeight: 800 }}>Budget App</h1>
 
           {profile?.picture ? (
-            <img
-              src={profile.picture}
-              alt={profile.name || 'ユーザー'}
-              title={profile.name}
-              onClick={() => setView('settings')}
-              style={{ width: 42, height: 42, borderRadius: '50%', cursor: 'pointer', border: `2px solid ${theme.accent}` }}
-            />
+            <ProfileAvatar src={profile.picture} alt={profile.name || 'ユーザー'} size={42} onClick={() => setView('settings')} />
           ) : (
             <button onClick={() => setView('settings')} style={{ border: 'none', borderRadius: 16, padding: '8px 14px', background: theme.accent, color: '#fff', fontSize: 16 }}>設定</button>
           )}
@@ -962,8 +986,8 @@ function App() {
         {view === 'settings' && (
           <div>
             {profile && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                <img src={profile.picture} alt={profile.name} style={{ width: 48, height: 48, borderRadius: '50%' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                <ProfileAvatar src={profile.picture} alt={profile.name} size={52} />
                 <div>{profile.name}</div>
               </div>
             )}
