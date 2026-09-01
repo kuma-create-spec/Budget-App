@@ -257,7 +257,6 @@ function toNumber(raw) {
   return isNaN(n) ? 0 : n
 }
 
-// PayPayのCSVの「取引日」(例: 2024/06/03 11:28) を YYYY-MM-DD に変換
 function paypayDateToIso(raw) {
   const m = String(raw).match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/)
   if (!m) return ''
@@ -268,15 +267,15 @@ function paypayDateToIso(raw) {
 function App() {
   const [accessToken, setAccessToken] = useState(null)
   const [profile, setProfile] = useState(null)
-  const [view, setView] = useState('expense') // expense | income | summary | paypay | settings
+  const [view, setView] = useState('expense')
   const [expenseSubView, setExpenseSubView] = useState('auto')
   const [incomeSubView, setIncomeSubView] = useState('input')
   const [summarySubView, setSummarySubView] = useState('chart')
   const [status, setStatus] = useState('')
-  const [scanning, setScanning] = useState(false)
   const tokenClientRef = useRef(null)
   const sheetIdCacheRef = useRef({})
   const lastCommentedMonthRef = useRef(null)
+  const accessTokenRef = useRef(null) // 非同期処理の中で常に最新のトークンを参照するため
 
   const [date, setDate] = useState('')
   const [store, setStore] = useState('')
@@ -284,6 +283,9 @@ function App() {
   const [category, setCategory] = useState('')
   const [memo, setMemo] = useState('')
   const [receiptCategory, setReceiptCategory] = useState('')
+
+  // レシートの読み取り待ち行列(連続で撮影できるようにするための一覧)
+  const [receiptQueue, setReceiptQueue] = useState([]) // { id, status: 'processing'|'done'|'error', date, store, amount, category, error }
 
   const [yearMonth, setYearMonth] = useState('')
   const [totalPay, setTotalPay] = useState(0)
@@ -309,9 +311,8 @@ function App() {
   const [editingIncomeRow, setEditingIncomeRow] = useState(null)
   const [incomeEditDraft, setIncomeEditDraft] = useState(null)
 
-  // PayPay CSV取り込み用
   const [paypayLoading, setPaypayLoading] = useState(false)
-  const [paypayPreview, setPaypayPreview] = useState([]) // { date, store, amount, category }
+  const [paypayPreview, setPaypayPreview] = useState([])
   const [paypaySkippedCount, setPaypaySkippedCount] = useState(0)
   const [paypaySaving, setPaypaySaving] = useState(false)
 
@@ -324,12 +325,14 @@ function App() {
     const expiryTime = Date.now() + expiresInSeconds * 1000
     localStorage.setItem(TOKEN_KEY, token)
     localStorage.setItem(EXPIRY_KEY, String(expiryTime))
+    accessTokenRef.current = token
     setAccessToken(token)
   }
 
   const clearToken = () => {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(EXPIRY_KEY)
+    accessTokenRef.current = null
     setAccessToken(null)
     setProfile(null)
   }
@@ -364,6 +367,7 @@ function App() {
       const savedExpiry = Number(localStorage.getItem(EXPIRY_KEY))
 
       if (savedToken && savedExpiry > Date.now()) {
+        accessTokenRef.current = savedToken
         setAccessToken(savedToken)
         fetchProfile(savedToken)
       } else if (savedToken) {
@@ -390,10 +394,11 @@ function App() {
   }
 
   const appendRow = async (sheetName, row) => {
+    const token = accessTokenRef.current
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(sheetName)}!A:Z:append?valueInputOption=USER_ENTERED`
     const res = await fetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ values: [row] }),
     })
     if (res.ok) return true
@@ -408,7 +413,7 @@ function App() {
 
   const fetchSheetValues = async (sheetName) => {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(sheetName)}`
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessTokenRef.current}` } })
     if (!res.ok) {
       const err = await res.json()
       throw new Error(err.error.message)
@@ -420,7 +425,7 @@ function App() {
   const getSheetId = async (sheetName) => {
     if (sheetIdCacheRef.current[sheetName] !== undefined) return sheetIdCacheRef.current[sheetName]
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=sheets.properties`
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessTokenRef.current}` } })
     const data = await res.json()
     const found = data.sheets.find((s) => s.properties.title === sheetName)
     const id = found ? found.properties.sheetId : null
@@ -432,7 +437,7 @@ function App() {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(sheetName)}!C${rowNumber}:G${rowNumber}?valueInputOption=USER_ENTERED`
     const res = await fetch(url, {
       method: 'PUT',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${accessTokenRef.current}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ values: [values] }),
     })
     if (!res.ok) {
@@ -446,7 +451,7 @@ function App() {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`
     const res = await fetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${accessTokenRef.current}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: rowNumber - 1, endIndex: rowNumber } } }] }),
     })
     if (!res.ok) {
@@ -562,29 +567,44 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, summarySubView, selectedMonth, monthlySummary])
 
-  const handleReceiptImage = async (e) => {
+  // レシート画像が選ばれた瞬間に、待ち行列に追加してすぐに次の撮影ができるようにする
+  const handleReceiptImage = (e) => {
     const file = e.target.files[0]
+    e.target.value = '' // すぐにリセットして、続けて撮影できるようにする
+
     if (!file) return
-    if (!accessToken) {
+    if (!accessTokenRef.current) {
       setStatus('先にログインしてください')
       return
     }
-    setScanning(true)
-    setStatus('レシートを読み取っています...')
-    try {
-      const result = await analyzeReceipt(file)
-      const finalCategory = receiptCategory || result.category || 'その他'
-      const id = Math.random().toString(16).slice(2, 10)
-      const row = [id, '', result.date || '', result.store || '', result.amount || '', finalCategory, '']
-      setStatus('保存中...')
-      const ok = await appendRow(EXPENSE_SHEET, row)
-      if (ok) setStatus(`自動保存しました!(${result.date || '?'} / ${result.store || '?'} / ${result.amount || '?'}円 / ${finalCategory})`)
-    } catch (err) {
-      setStatus('読み取り・保存エラー: ' + err.message)
-    } finally {
-      setScanning(false)
-      e.target.value = ''
-    }
+
+    const jobId = Math.random().toString(16).slice(2, 10)
+    const chosenCategory = receiptCategory // その時点で選ばれていたカテゴリを使う
+
+    setReceiptQueue((prev) => [{ id: jobId, status: 'processing' }, ...prev])
+
+    // ここから先は裏側で処理し、画面はブロックしない
+    ;(async () => {
+      try {
+        const result = await analyzeReceipt(file)
+        const finalCategory = chosenCategory || result.category || 'その他'
+        const row = [jobId, '', result.date || '', result.store || '', result.amount || '', finalCategory, '']
+        const ok = await appendRow(EXPENSE_SHEET, row)
+        if (ok) {
+          setReceiptQueue((prev) =>
+            prev.map((j) =>
+              j.id === jobId
+                ? { ...j, status: 'done', date: result.date, store: result.store, amount: result.amount, category: finalCategory }
+                : j
+            )
+          )
+        } else {
+          setReceiptQueue((prev) => prev.map((j) => (j.id === jobId ? { ...j, status: 'error', error: 'セッション更新後、再度お試しください' } : j)))
+        }
+      } catch (err) {
+        setReceiptQueue((prev) => prev.map((j) => (j.id === jobId ? { ...j, status: 'error', error: err.message } : j)))
+      }
+    })()
   }
 
   const addExpense = async () => {
@@ -704,7 +724,6 @@ function App() {
     }
   }
 
-  // PayPayのCSVファイルを読み込み、重複を除外してプレビューを作る
   const handlePaypayCsv = (e) => {
     const file = e.target.files[0]
     if (!file) return
@@ -723,17 +742,11 @@ function App() {
       skipEmptyLines: true,
       complete: async (results) => {
         try {
-          // 「支払い」の取引のみを対象にする
           const payments = results.data
             .filter((r) => (r['取引内容'] || '').trim() === '支払い')
-            .map((r) => ({
-              date: paypayDateToIso(r['取引日']),
-              store: (r['取引先'] || '').trim(),
-              amount: toNumber(r['出金金額（円）']),
-            }))
+            .map((r) => ({ date: paypayDateToIso(r['取引日']), store: (r['取引先'] || '').trim(), amount: toNumber(r['出金金額（円）']) }))
             .filter((r) => r.date && r.amount > 0)
 
-          // 既存の支出データを取得し、日付+金額が完全一致するものを重複とみなす
           const existingValues = await fetchSheetValues(EXPENSE_SHEET)
           const existingKeys = new Set(existingValues.slice(1).map((r) => `${r[2]}|${toNumber(r[4])}`))
 
@@ -741,11 +754,8 @@ function App() {
           let skipped = 0
           for (const p of payments) {
             const key = `${p.date}|${p.amount}`
-            if (existingKeys.has(key)) {
-              skipped += 1
-            } else {
-              uniquePayments.push(p)
-            }
+            if (existingKeys.has(key)) skipped += 1
+            else uniquePayments.push(p)
           }
 
           setPaypaySkippedCount(skipped)
@@ -759,11 +769,7 @@ function App() {
           setStatus('AIがカテゴリを推測しています...')
           const categories = await guessCategoriesForStores(uniquePayments.map((p) => p.store))
 
-          const preview = uniquePayments.map((p, i) => ({
-            ...p,
-            category: categories[i] || 'その他',
-            include: true,
-          }))
+          const preview = uniquePayments.map((p, i) => ({ ...p, category: categories[i] || 'その他', include: true }))
           setPaypayPreview(preview)
           setStatus(`${preview.length}件の新しい取引が見つかりました(${skipped}件は登録済みのため除外)`)
         } catch (err) {
@@ -990,12 +996,43 @@ function App() {
                 <div style={{ fontSize: 16, fontWeight: 'bold', marginBottom: 8, color: theme.text }}>📷 レシートで自動記録</div>
                 <CategoryButtons value={receiptCategory} onChange={setReceiptCategory} allowEmpty />
                 <label style={{ display: 'block', textAlign: 'center', marginTop: 12, padding: '14px 16px', background: theme.accent, color: '#fff', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold', fontSize: 17 }}>
-                  {scanning ? '読み取り・保存中...' : '📷 レシートを撮影する'}
-                  <input type="file" accept="image/*" capture="environment" onChange={handleReceiptImage} style={{ display: 'none' }} disabled={scanning} />
+                  📷 レシートを撮影する
+                  <input type="file" accept="image/*" capture="environment" onChange={handleReceiptImage} style={{ display: 'none' }} />
                 </label>
                 <p style={{ fontSize: 13, color: '#888', marginTop: 8, marginBottom: 0 }}>
-                  撮影すると内容を確認せずそのまま記録されます。カテゴリを選んでおくとその通りに、「AIにおまかせ」ならAIの読み取り結果を使います。
+                  撮影すると内容を確認せずそのまま記録されます。処理中でも、続けて次のレシートを撮影できます。
                 </p>
+
+                {receiptQueue.length > 0 && (
+                  <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {receiptQueue.map((job) => (
+                      <div
+                        key={job.id}
+                        style={{
+                          border: '1px solid #eee',
+                          borderRadius: 8,
+                          padding: 10,
+                          background: job.status === 'error' ? '#FFF3F0' : '#FAFAFA',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                        }}
+                      >
+                        {job.status === 'processing' && <div style={{ fontSize: 14, color: '#888' }}>⏳ 読み取り中...</div>}
+                        {job.status === 'done' && (
+                          <>
+                            <div>
+                              <div style={{ fontSize: 12, color: categoryColor(job.category), fontWeight: 'bold' }}>{job.date} ・ {job.category}</div>
+                              <div style={{ fontSize: 14 }}>{job.store || '(店舗名なし)'}</div>
+                            </div>
+                            <div style={{ fontWeight: 'bold' }}>{Number(job.amount || 0).toLocaleString()}円</div>
+                          </>
+                        )}
+                        {job.status === 'error' && <div style={{ fontSize: 13, color: '#E8613F' }}>⚠️ 失敗: {job.error}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
